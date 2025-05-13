@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import openai
-from flask import Flask
+from flask import Flask, request, jsonify
 
 # Load environment variables
 load_dotenv()
@@ -41,10 +41,17 @@ bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 def health_check():
     return 'Bot is running!'
 
-# Webhook mode startup
+# Webhook endpoint for Telegram
+@app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot.bot)
+    bot.dispatcher.process_update(update)
+    return jsonify({"status": "ok"})
+
+# Run Flask app
 if __name__ == "__main__":
-    bot.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
-        webhook_url=f"https://exist-search.onrender.com/{TELEGRAM_TOKEN}"
-    ) 
+    # Set webhook
+    bot.bot.set_webhook(url=f"https://exist-search.onrender.com/{TELEGRAM_TOKEN}")
+    # Run Flask app
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port) 
