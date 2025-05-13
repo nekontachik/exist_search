@@ -3,4 +3,5 @@ openai
 python-dotenv
 fastapi
 uvicorn
-gunicorn 
+gunicorn
+httpx 

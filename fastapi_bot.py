@@ -5,11 +5,15 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import time
+import asyncio
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Depends
 from openai import OpenAI
+from openai.types.error import APIError, RateLimitError, APIConnectionError
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -59,7 +63,24 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    # Add periodic job to keep service alive
+    application.job_queue.run_repeating(keep_alive_ping, interval=840, first=10)  # 14 minutes (Render free tier sleeps after 15)
+    
     return application
+
+# Periodic job to keep the service alive
+async def keep_alive_ping(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ping self to keep the service alive on free tier."""
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(f"Sending keep-alive ping at {current_time}")
+    try:
+        # Self ping the health check endpoint
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get("https://exist-search.onrender.com/")
+            logger.info(f"Keep-alive ping response: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Error in keep-alive ping: {str(e)}")
 
 # Context manager for application lifecycle
 @asynccontextmanager
@@ -152,17 +173,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Send "typing" action to show the bot is processing
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    try:
-        # Send user text to OpenAI
-        response = openai_client.chat.completions.create(
-            model=GPTS_MODEL_ID,
-            messages=[{"role": "user", "content": user_text}]
-        )
-        reply = response.choices[0].message.content.strip()
-        logger.info(f"GPTS response for user {user.id} (length: {len(reply)} chars)")
-        
-        # Reply to user
-        await update.message.reply_text(reply)
-    except Exception as e:
-        logger.error(f"Error processing message: {str(e)}")
-        await update.message.reply_text("Вибачте, виникла помилка. Спробуйте ще раз пізніше.") 
+    start_time = time.time()
+    max_retries = 2
+    retry_count = 0
+    
+    while retry_count <= max_retries:
+        try:
+            # Send user text to OpenAI
+            response = openai_client.chat.completions.create(
+                model=GPTS_MODEL_ID,
+                messages=[{"role": "user", "content": user_text}],
+                timeout=60  # 60 second timeout
+            )
+            reply = response.choices[0].message.content.strip()
+            processing_time = time.time() - start_time
+            logger.info(f"GPTS response for user {user.id} (length: {len(reply)} chars, time: {processing_time:.2f}s)")
+            
+            # Reply to user
+            await update.message.reply_text(reply)
+            return
+            
+        except RateLimitError as e:
+            logger.error(f"Rate limit exceeded: {str(e)}")
+            if retry_count == max_retries:
+                await update.message.reply_text(
+                    "Вибачте, зараз занадто багато запитів до серверів OpenAI. Будь ласка, спробуйте пізніше."
+                )
+            retry_count += 1
+            time.sleep(2)  # Wait before retrying
+            
+        except APIConnectionError as e:
+            logger.error(f"Connection error to OpenAI: {str(e)}")
+            if retry_count == max_retries:
+                await update.message.reply_text(
+                    "Вибачте, виникли проблеми зі з'єднанням до серверів OpenAI. Будь ласка, спробуйте пізніше."
+                )
+            retry_count += 1
+            time.sleep(2)  # Wait before retrying
+            
+        except APIError as e:
+            logger.error(f"OpenAI API error: {str(e)}")
+            await update.message.reply_text(
+                "Вибачте, виникла помилка при обробці вашого запиту. Будь ласка, спробуйте пізніше."
+            )
+            return
+            
+        except Exception as e:
+            logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            await update.message.reply_text(
+                "Вибачте, виникла помилка. Спробуйте ще раз пізніше або змініть ваш запит."
+            )
+            return 
