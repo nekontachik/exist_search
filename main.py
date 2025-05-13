@@ -46,5 +46,5 @@ if __name__ == "__main__":
     bot.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 8000)),
-        webhook_url=f"https://<YOUR-RENDER-SERVICE>.onrender.com/{TELEGRAM_TOKEN}"
+        webhook_url=f"https://exist-search.onrender.com/{TELEGRAM_TOKEN}"
     ) 
