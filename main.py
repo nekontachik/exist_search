@@ -13,7 +13,16 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Depends
 from openai import OpenAI
-from openai.types.error import APIError, RateLimitError, APIConnectionError
+# Безпечний імпорт помилок OpenAI, сумісний з різними версіями
+try:
+    from openai.types.error import APIError, RateLimitError, APIConnectionError
+except ImportError:
+    # Створюємо фіктивні класи для старіших версій або якщо модулі недоступні
+    class APIError(Exception): pass
+    class RateLimitError(Exception): pass
+    class APIConnectionError(Exception): pass
+    logging.warning("Could not import specific OpenAI error types, using fallback error classes")
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -64,7 +73,15 @@ def create_application() -> Application:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Add periodic job to keep service alive
-    application.job_queue.run_repeating(keep_alive_ping, interval=840, first=10)  # 14 minutes (Render free tier sleeps after 15)
+    # Check if job_queue is available (might not be in some environments)
+    try:
+        if hasattr(application, 'job_queue') and application.job_queue:
+            application.job_queue.run_repeating(keep_alive_ping, interval=840, first=10)
+            logger.info("Scheduled keep-alive ping job")
+        else:
+            logger.warning("Job queue is not available, skipping keep-alive ping setup")
+    except Exception as e:
+        logger.error(f"Error setting up job queue: {str(e)}")
     
     return application
 
@@ -179,12 +196,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     while retry_count <= max_retries:
         try:
-            # Send user text to OpenAI
-            response = openai_client.chat.completions.create(
-                model=GPTS_MODEL_ID,
-                messages=[{"role": "user", "content": user_text}],
-                timeout=60  # 60 second timeout
-            )
+            # Send user text to OpenAI with error handling for different versions
+            try:
+                # Try the newer version with timeout parameter
+                response = openai_client.chat.completions.create(
+                    model=GPTS_MODEL_ID,
+                    messages=[{"role": "user", "content": user_text}],
+                    timeout=60  # 60 second timeout
+                )
+            except TypeError:
+                # Fallback for older versions that don't support timeout parameter
+                logger.warning("OpenAI client doesn't support timeout parameter, using without timeout")
+                response = openai_client.chat.completions.create(
+                    model=GPTS_MODEL_ID,
+                    messages=[{"role": "user", "content": user_text}]
+                )
+                
             reply = response.choices[0].message.content.strip()
             processing_time = time.time() - start_time
             logger.info(f"GPTS response for user {user.id} (length: {len(reply)} chars, time: {processing_time:.2f}s)")
@@ -192,34 +219,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # Reply to user
             await update.message.reply_text(reply)
             return
+        
+        except (APIError, RateLimitError, APIConnectionError) as specific_error:
+            # Обробка відомих помилок OpenAI API
+            error_type = type(specific_error).__name__
+            logger.error(f"OpenAI {error_type}: {str(specific_error)}")
             
-        except RateLimitError as e:
-            logger.error(f"Rate limit exceeded: {str(e)}")
-            if retry_count == max_retries:
-                await update.message.reply_text(
-                    "Вибачте, зараз занадто багато запитів до серверів OpenAI. Будь ласка, спробуйте пізніше."
-                )
-            retry_count += 1
-            time.sleep(2)  # Wait before retrying
+            if isinstance(specific_error, RateLimitError) or isinstance(specific_error, APIConnectionError):
+                if retry_count < max_retries:
+                    retry_count += 1
+                    wait_time = 2 * (retry_count) # Збільшуємо час очікування з кожною спробою
+                    logger.info(f"Retrying after {wait_time}s (attempt {retry_count} of {max_retries})")
+                    time.sleep(wait_time)
+                    continue
             
-        except APIConnectionError as e:
-            logger.error(f"Connection error to OpenAI: {str(e)}")
-            if retry_count == max_retries:
-                await update.message.reply_text(
-                    "Вибачте, виникли проблеми зі з'єднанням до серверів OpenAI. Будь ласка, спробуйте пізніше."
-                )
-            retry_count += 1
-            time.sleep(2)  # Wait before retrying
-            
-        except APIError as e:
-            logger.error(f"OpenAI API error: {str(e)}")
-            await update.message.reply_text(
-                "Вибачте, виникла помилка при обробці вашого запиту. Будь ласка, спробуйте пізніше."
-            )
+            # Якщо це остання спроба або помилка не підлягає повторним спробам
+            error_messages = {
+                "RateLimitError": "Вибачте, зараз занадто багато запитів до серверів OpenAI. Будь ласка, спробуйте пізніше.",
+                "APIConnectionError": "Вибачте, виникли проблеми зі з'єднанням до серверів OpenAI. Будь ласка, спробуйте пізніше.",
+                "APIError": "Вибачте, виникла помилка при обробці вашого запиту. Будь ласка, спробуйте пізніше."
+            }
+            await update.message.reply_text(error_messages.get(error_type, "Вибачте, виникла помилка. Спробуйте ще раз пізніше."))
             return
             
         except Exception as e:
-            logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error processing message: {str(e)}", exc_info=True)
             await update.message.reply_text(
                 "Вибачте, виникла помилка. Спробуйте ще раз пізніше або змініть ваш запит."
             )
