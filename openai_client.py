@@ -29,7 +29,7 @@ if not GPTS_MODEL_ID:
     raise ValueError("GPTS_MODEL_ID environment variable is required")
 
 # Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY, default_headers={"OpenAI-Beta": "assistants=v2"})
 
 # Better error handling for different OpenAI versions
 # Create fallback error classes that we'll use if imports fail
