@@ -1,17 +1,19 @@
 services:
   - type: web
-    name: exist-search
-    runtime: python
+    name: exist-bot
+    env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT -k uvicorn.workers.UvicornWorker --timeout 120 --workers 2
+    startCommand: gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.9
-      - key: WEBHOOK_URL
-        value: https://exist-search.onrender.com
       - key: TELEGRAM_TOKEN
         sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: GPTS_MODEL_ID
-        sync: false 
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: LOG_LEVEL
+        value: "INFO" 

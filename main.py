@@ -12,34 +12,22 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Depends
-from openai import OpenAI
-
-# Better error handling for different OpenAI versions
-# Create fallback error classes that we'll use if imports fail
-class BaseAPIError(Exception): pass
-class BaseRateLimitError(Exception): pass
-class BaseAPIConnectionError(Exception): pass
-
-# Try to import from different potential locations based on OpenAI version
-try:
-    # Newer versions of OpenAI SDK (>=1.0.0)
-    from openai.types.error import APIError, RateLimitError, APIConnectionError
-    logging.info("Successfully imported OpenAI error types from openai.types.error")
-except ImportError:
-    try:
-        # Older versions of OpenAI SDK
-        from openai.error import APIError, RateLimitError, APIConnectionError
-        logging.info("Successfully imported OpenAI error types from openai.error")
-    except ImportError:
-        # Fallback to our predefined classes if neither import works
-        logging.warning("Could not import specific OpenAI error types, using fallback error classes")
-        # Assign our base classes to the expected names
-        APIError = BaseAPIError
-        RateLimitError = BaseRateLimitError
-        APIConnectionError = BaseAPIConnectionError
-
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+from utils import (
+    make_http_request, 
+    validate_input, 
+    format_error_message, 
+    metrics,
+    DEFAULT_TIMEOUT
+)
+from openai_client import (
+    generate_response, 
+    APIError, 
+    RateLimitError, 
+    APIConnectionError
+)
 
 # Configure logging - important for production debugging
 logging.basicConfig(
@@ -53,25 +41,12 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GPTS_MODEL_ID = os.getenv("GPTS_MODEL_ID")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_URL", "https://exist-search.onrender.com")
 
 # Validate required environment variables
 if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN environment variable is not set!")
     raise ValueError("TELEGRAM_TOKEN environment variable is required")
-    
-if not OPENAI_API_KEY:
-    logger.error("OPENAI_API_KEY environment variable is not set!")
-    raise ValueError("OPENAI_API_KEY environment variable is required")
-    
-if not GPTS_MODEL_ID:
-    logger.error("GPTS_MODEL_ID environment variable is not set!")
-    raise ValueError("GPTS_MODEL_ID environment variable is required")
-
-# Initialize OpenAI client
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Create bot application
 def create_application() -> Application:
@@ -86,6 +61,7 @@ def create_application() -> Application:
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Add periodic job to keep service alive
@@ -108,10 +84,8 @@ async def keep_alive_ping(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Sending keep-alive ping at {current_time}")
     try:
         # Self ping the health check endpoint
-        import httpx
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{WEBHOOK_BASE_URL}/")
-            logger.info(f"Keep-alive ping response: {response.status_code}")
+        response = await make_http_request(f"{WEBHOOK_BASE_URL}/", timeout=DEFAULT_TIMEOUT)
+        logger.info(f"Keep-alive ping response: {response.status_code}")
     except Exception as e:
         logger.error(f"Error in keep-alive ping: {str(e)}")
 
@@ -157,7 +131,7 @@ async def health_check():
     return {
         "status": "Bot is running!",
         "telegram_token": f"{TELEGRAM_TOKEN[:5]}...{TELEGRAM_TOKEN[-5:]}",
-        "gpts_model": GPTS_MODEL_ID
+        "metrics": metrics.get_metrics()
     }
 
 @app.post(f"/{TELEGRAM_TOKEN}")
@@ -192,8 +166,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Просто надішліть мені повідомлення, і я відповім!\n\n"
         "Доступні команди:\n"
         "/start - Почати роботу з ботом\n"
-        "/help - Показати цю довідку"
+        "/help - Показати цю довідку\n"
+        "/status - Показати статус бота"
     )
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message with bot status metrics."""
+    user = update.effective_user
+    logger.info(f"Status command from user {user.id} (@{user.username})")
+    
+    # Get metrics
+    bot_metrics = metrics.get_metrics()
+    
+    # Format uptime
+    uptime_seconds = bot_metrics["uptime_seconds"]
+    hours, remainder = divmod(uptime_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{int(hours)}г {int(minutes)}хв {int(seconds)}с"
+    
+    # Format message
+    status_message = (
+        f"📊 Статус бота:\n\n"
+        f"⏱ Час роботи: {uptime_str}\n"
+        f"📨 Всього запитів: {bot_metrics['total_requests']}\n"
+        f"⚠️ Помилок: {int(bot_metrics['error_rate'] * 100)}%\n"
+        f"⚡️ Середній час відповіді: {bot_metrics['avg_processing_time']:.2f}с\n"
+        f"📈 Запитів за хвилину: {bot_metrics['requests_per_minute']:.1f}"
+    )
+    
+    await update.message.reply_text(status_message)
 
 # Message handler
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -203,64 +204,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     logger.info(f"Message from user {user.id} (@{user.username}): {user_text[:30]}...")
     
+    # Validate input
+    if not validate_input(user_text):
+        await update.message.reply_text(format_error_message("ValidationError"))
+        return
+    
     # Send "typing" action to show the bot is processing
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    start_time = time.time()
-    max_retries = 2
-    retry_count = 0
-    
-    while retry_count <= max_retries:
-        try:
-            # Send user text to OpenAI with error handling for different versions
-            try:
-                # Try the newer version with timeout parameter
-                response = openai_client.chat.completions.create(
-                    model=GPTS_MODEL_ID,
-                    messages=[{"role": "user", "content": user_text}],
-                    timeout=60  # 60 second timeout
-                )
-            except TypeError:
-                # Fallback for older versions that don't support timeout parameter
-                logger.warning("OpenAI client doesn't support timeout parameter, using without timeout")
-                response = openai_client.chat.completions.create(
-                    model=GPTS_MODEL_ID,
-                    messages=[{"role": "user", "content": user_text}]
-                )
-                
-            reply = response.choices[0].message.content.strip()
-            processing_time = time.time() - start_time
-            logger.info(f"GPTS response for user {user.id} (length: {len(reply)} chars, time: {processing_time:.2f}s)")
-            
-            # Reply to user
-            await update.message.reply_text(reply)
-            return
+    try:
+        # Generate response from OpenAI
+        reply = await generate_response(user_text)
         
-        except (APIError, RateLimitError, APIConnectionError) as specific_error:
-            # Обробка відомих помилок OpenAI API
-            error_type = type(specific_error).__name__
-            logger.error(f"OpenAI {error_type}: {str(specific_error)}")
-            
-            if isinstance(specific_error, RateLimitError) or isinstance(specific_error, APIConnectionError):
-                if retry_count < max_retries:
-                    retry_count += 1
-                    wait_time = 2 * (retry_count) # Збільшуємо час очікування з кожною спробою
-                    logger.info(f"Retrying after {wait_time}s (attempt {retry_count} of {max_retries})")
-                    time.sleep(wait_time)
-                    continue
-            
-            # Якщо це остання спроба або помилка не підлягає повторним спробам
-            error_messages = {
-                "RateLimitError": "Вибачте, зараз занадто багато запитів до серверів OpenAI. Будь ласка, спробуйте пізніше.",
-                "APIConnectionError": "Вибачте, виникли проблеми зі з'єднанням до серверів OpenAI. Будь ласка, спробуйте пізніше.",
-                "APIError": "Вибачте, виникла помилка при обробці вашого запиту. Будь ласка, спробуйте пізніше."
-            }
-            await update.message.reply_text(error_messages.get(error_type, "Вибачте, виникла помилка. Спробуйте ще раз пізніше."))
-            return
-            
-        except Exception as e:
-            logger.error(f"Unexpected error processing message: {str(e)}", exc_info=True)
-            await update.message.reply_text(
-                "Вибачте, виникла помилка. Спробуйте ще раз пізніше або змініть ваш запит."
-            )
-            return 
+        # Reply to user
+        await update.message.reply_text(reply)
+        
+    except (APIError, RateLimitError, APIConnectionError) as e:
+        # Handle known OpenAI API errors
+        error_type = type(e).__name__
+        await update.message.reply_text(format_error_message(error_type))
+        
+    except Exception as e:
+        # Handle unexpected errors
+        logger.error(f"Unexpected error processing message: {str(e)}", exc_info=True)
+        await update.message.reply_text(format_error_message("UnknownError")) 
