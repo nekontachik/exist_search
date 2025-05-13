@@ -1,1 +1,1 @@
-web: gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornH11Worker --bind 0.0.0.0:$PORT --timeout 120 # версія 2023-05-13 
+web: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 120 # версія 2023-05-13 

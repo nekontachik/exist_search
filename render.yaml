@@ -3,7 +3,6 @@ services:
     name: exist-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
@@ -16,4 +15,6 @@ services:
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: LOG_LEVEL
-        value: "INFO" 
+        value: "INFO"
+      - key: PORT
+        value: "10000" 
