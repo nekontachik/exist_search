@@ -1,1 +1,1 @@
-web: python main_webhook.py 
+web: uvicorn fastapi_bot:app --host=0.0.0.0 --port=$PORT 
