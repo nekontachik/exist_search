@@ -3,7 +3,7 @@ import logging
 import json
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, Dispatcher
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import openai
 from flask import Flask, request, jsonify
 
