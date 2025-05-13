@@ -8,4 +8,10 @@ services:
       - key: PYTHON_VERSION
         value: 3.9
       - key: WEBHOOK_URL
-        value: https://exist-search.onrender.com 
+        value: https://exist-search.onrender.com
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GPTS_MODEL_ID
+        sync: false 

@@ -13,15 +13,30 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Depends
 from openai import OpenAI
-# Безпечний імпорт помилок OpenAI, сумісний з різними версіями
+
+# Better error handling for different OpenAI versions
+# Create fallback error classes that we'll use if imports fail
+class BaseAPIError(Exception): pass
+class BaseRateLimitError(Exception): pass
+class BaseAPIConnectionError(Exception): pass
+
+# Try to import from different potential locations based on OpenAI version
 try:
+    # Newer versions of OpenAI SDK (>=1.0.0)
     from openai.types.error import APIError, RateLimitError, APIConnectionError
+    logging.info("Successfully imported OpenAI error types from openai.types.error")
 except ImportError:
-    # Створюємо фіктивні класи для старіших версій або якщо модулі недоступні
-    class APIError(Exception): pass
-    class RateLimitError(Exception): pass
-    class APIConnectionError(Exception): pass
-    logging.warning("Could not import specific OpenAI error types, using fallback error classes")
+    try:
+        # Older versions of OpenAI SDK
+        from openai.error import APIError, RateLimitError, APIConnectionError
+        logging.info("Successfully imported OpenAI error types from openai.error")
+    except ImportError:
+        # Fallback to our predefined classes if neither import works
+        logging.warning("Could not import specific OpenAI error types, using fallback error classes")
+        # Assign our base classes to the expected names
+        APIError = BaseAPIError
+        RateLimitError = BaseRateLimitError
+        APIConnectionError = BaseAPIConnectionError
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -40,6 +55,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GPTS_MODEL_ID = os.getenv("GPTS_MODEL_ID")
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_URL", "https://exist-search.onrender.com")
 
 # Validate required environment variables
 if not TELEGRAM_TOKEN:
@@ -94,7 +110,7 @@ async def keep_alive_ping(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Self ping the health check endpoint
         import httpx
         async with httpx.AsyncClient() as client:
-            response = await client.get("https://exist-search.onrender.com/")
+            response = await client.get(f"{WEBHOOK_BASE_URL}/")
             logger.info(f"Keep-alive ping response: {response.status_code}")
     except Exception as e:
         logger.error(f"Error in keep-alive ping: {str(e)}")
@@ -110,7 +126,7 @@ async def lifespan(app: FastAPI):
     app.state.bot_app = create_application()
     
     # Set webhook
-    webhook_url = f"https://exist-search.onrender.com/{TELEGRAM_TOKEN}"
+    webhook_url = f"{WEBHOOK_BASE_URL}/{TELEGRAM_TOKEN}"
     
     # Start the bot
     async with app.state.bot_app:
