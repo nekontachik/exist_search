@@ -1,8 +1,9 @@
 import os
 import logging
+import json
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, Dispatcher
 import openai
 from flask import Flask, request, jsonify
 
@@ -56,9 +57,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Вибачте, сталася помилка. Спробуйте ще раз пізніше.")
 
 # Initialize bot
-bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-bot.add_handler(CommandHandler("start", start))
-bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # Flask route for health check
 @app.route('/')
@@ -71,12 +72,23 @@ def health_check():
 def webhook():
     logger.info("Webhook called by Telegram")
     try:
-        update = Update.de_json(request.get_json(force=True), bot.bot)
-        logger.info(f"Update received: {update}")
-        bot.dispatcher.process_update(update)
+        # Log the incoming data
+        data = request.get_json(force=True)
+        logger.info(f"Received data: {json.dumps(data)}")
+        
+        # Process the update
+        update = Update.de_json(data, application.bot)
+        logger.info("Update successfully parsed")
+        
+        # Process update in a separate thread to not block response
+        application.create_task(application.process_update(update))
+        
+        # Return success immediately
         return jsonify({"status": "ok"})
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}")
+        # Always return 200 OK to Telegram even if there's an error
+        # This prevents Telegram from repeatedly trying to send the same update
         return jsonify({"status": "error", "message": str(e)})
 
 # Run Flask app
@@ -85,7 +97,7 @@ if __name__ == "__main__":
     webhook_url = f"https://exist-search.onrender.com/{TELEGRAM_TOKEN}"
     logger.info(f"Setting webhook to: {webhook_url}")
     try:
-        bot.bot.set_webhook(url=webhook_url)
+        application.bot.set_webhook(url=webhook_url)
         logger.info("Webhook set successfully")
     except Exception as e:
         logger.error(f"Failed to set webhook: {str(e)}")
