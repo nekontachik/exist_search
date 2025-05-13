@@ -4,7 +4,7 @@ import json
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-import openai
+from openai import OpenAI
 from flask import Flask, request, jsonify
 
 # Configure logging
@@ -19,7 +19,9 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GPTS_MODEL_ID = os.getenv("GPTS_MODEL_ID")
-openai.api_key = OPENAI_API_KEY
+
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Log environment variables (without sensitive data)
 logger.info(f"Bot initialized with GPTS model: {GPTS_MODEL_ID}")
@@ -30,6 +32,9 @@ else:
 
 # Create Flask app
 app = Flask(__name__)
+
+# Make sure app is accessible to gunicorn
+wsgi_app = app.wsgi_app
 
 # Start command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,7 +50,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         logger.info(f"Sending request to OpenAI with model {GPTS_MODEL_ID}")
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=GPTS_MODEL_ID,
             messages=[{"role": "user", "content": user_text}]
         )
